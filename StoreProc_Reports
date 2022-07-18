@@ -1,0 +1,237 @@
+USE [Nursetec]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_FetchAllReports]    Script Date: 13/07/2022 14:09:46 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[sp_FetchAllReports]
+	-- Add the parameters for the stored procedure here
+	@Employee_ID int = 0,
+	@startDate DATE = '',
+	@endDate DATE = '',
+	@OfficeID int = ''
+AS
+
+BEGIN
+
+SELECT 
+	   e.Employee_ID,
+       e.clock_date AS ClockDate,
+       CONCAT(e.Clock_Date,' ',e.clock_time) AS Clock_In,
+       CASE WHEN o.clock_time is NULL THEN CONCAT((SELECT TOP 1 Clock_Date 
+	   FROM Clocking c
+	   WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID),' ',(SELECT TOP 1 Clock_Time 
+	   FROM Clocking c
+	   WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID)) ELSE CONCAT(o.clock_date,' ',o.clock_Time) END AS Clock_Out,
+	   CASE WHEN o.Clock_Time is NULL THEN CONCAT('Clocked out on: ',
+	   CASE WHEN(SELECT TOP 1 Clock_Date 
+	   FROM Clocking c
+	   WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID)IS NULL THEN e.Clock_Date ELSE 
+	   (SELECT TOP 1 Clock_Date 
+	   FROM Clocking c
+	   WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID)end
+	   ,' - ',e.Notes) ELSE e.Notes END As Notes,
+	   CONCAT(e.Clock_Date,' ',e.Clock_Time) AS ConcIN,
+	   CASE WHEN o.Clock_Time is NULL THEN CASE WHEN(SELECT TOP 1 Clock_Time 
+	   Clock_Time FROM Clocking c WHERE Clock_Date>e.Clock_Date)IS NULL THEN NULL
+	   ELSE CONCAT((SELECT TOP 1 Clock_Date 
+	   FROM Clocking c
+	   WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID),' ',(SELECT TOP 1 Clock_Time 
+	   Clock_Time FROM Clocking c WHERE Clock_Date>e.Clock_Date AND Employee_ID=e.Employee_ID))End END As ConcDate
+INTO #SortedClockTimes FROM   Clocking e
+  outer apply (SELECT TOP 1 e2.clock_time,e2.Clock_Date 
+               FROM   Clocking e2
+               WHERE  e2.Employee_ID = e.Employee_ID
+               AND    e2.ActivityID = 2
+               AND    e2.clock_date = e.clock_date
+               AND    e2.clock_time > e.clock_time
+               ORDER BY e2.clock_time
+              ) o
+WHERE e.ActivityID = 1
+AND e.Clock_Date BETWEEN IIF(@startDate='',e.Clock_Date,@startDate) AND IIF(@endDate='',e.Clock_Date,@endDate)
+AND e.Employee_ID = IIF(@Employee_ID =''
+, e.Employee_ID, @Employee_ID)
+ORDER BY e.Employee_ID, e.Clock_Date
+
+
+
+DELETE FROM #SortedClockTimes WHERE Clock_Out =''
+
+SELECT Employee.Employee_ID, CONCAT(Employee.Surname,', ',Employee.NickName ) As Emp_Name,
+		ClockDate As ClockDate,MIN(Clock_In) As Time_In,
+		MAX(Clock_Out) AS Time_Out,
+		CAST(ROUND(DATEDIFF(second,MIN(Clock_In),MAX(Clock_OUT))/3600.00,2)AS DECIMAL(10,1)) AS Total_Hours 
+		,CASE WHEN OfficeID = 6 THEN 		
+		(CAST(ROUND(DATEDIFF(second,
+		CASE WHEN (SELECT CAST(MIN(Clock_In) as time)[time])>= '7:00' THEN MIN(Clock_In) ELSE CONCAT(CAST(MIN(Clock_in) as date) ,' ','7:00') END,
+		CASE WHEN MAX(Clock_Out)>= CONCAT(CAST(MIN(Clock_In) as date) ,' ','16:00') THEN CONCAT(CAST(MIN(Clock_In) as date),' ','16:00') ELSE MAX(Clock_Out) END)/3600.00,2) AS DECIMAL(10,1)))ELSE 
+		(CAST(ROUND(DATEDIFF(second,
+		CASE WHEN(SELECT CAST(MIN(Clock_In) as time)[time])>= '7:30' THEN MIN(Clock_In) ELSE CONCAT(CAST(MIN(Clock_in) as date) ,' ','7:30') END,
+		CASE WHEN MAX(Clock_Out)>= CONCAT(CAST(MIN(Clock_In) as date) ,' ','16:30') THEN CONCAT(CAST(MIN(Clock_In) as date) ,' ','16:30') ELSE MAX(Clock_Out) END)/3600.00,2) AS DECIMAL(10,1)))END AS Actual_Hours
+		INTO #StartTOEndHoursPerDay
+FROM #SortedClockTimes AS sc
+INNER JOIN Employee ON Employee.Employee_ID = sc.Employee_ID
+GROUP BY CONCAT(Employee.Surname,', ',Employee.NickName), Employee.Employee_ID, ClockDate, OfficeID
+
+
+
+SELECT #SortedClockTimes.ClockDate, #SortedClockTimes.Notes,Employee_ID 
+INTO #ClockWNotes
+FROM #SortedClockTimes 
+WHERE Notes !=''
+
+
+SELECT ste.Employee_ID,ste.Emp_Name,Employee.OfficeID,
+ste.ClockDate,ste.Time_In,ste.Time_Out,ste.Total_Hours,ste.Actual_Hours,CASE WHEN #ClockWNotes.Notes IS NULL
+THEN '' ELSE #ClockWNotes.Notes END AS Notes
+INTO #StartToEnd
+FROM #StartTOEndHoursPerDay as ste
+INNER JOIN Employee ON Employee.Employee_ID = ste.Employee_ID
+LEFT JOIN #ClockWNotes ON #ClockWNotes.ClockDate = ste.ClockDate
+AND #ClockWNotes.Employee_ID = ste.Employee_ID
+
+
+SELECT Employee_ID,ClockDate, COUNT(ClockDate)-1 As Breaks INTO #BreaksPerDay
+FROM #SortedClockTimes
+GROUP BY Employee_ID, ClockDate
+
+
+SELECT sc.Employee_ID,sc.ClockDate,  Clock_Out 
+INTO #BreakOUT 
+FROM #SortedClockTimes As sc
+INNER JOIN  #StartTOEndHoursPerDay ON #StartTOEndHoursPerDay.Employee_ID = sc.Employee_ID
+AND #StartTOEndHoursPerDay.ClockDate = sc.ClockDate
+
+
+SELECT sc.Employee_ID,sc.ClockDate,Clock_In 
+INTO #BreakIN 
+FROM #SortedClockTimes AS sc
+INNER JOIN #StartTOEndHoursPerDay ON #StartTOEndHoursPerDay.Employee_ID = sc.Employee_ID
+AND #StartTOEndHoursPerDay.ClockDate = sc.ClockDate 
+
+
+SELECT 
+	   o.Employee_ID,
+       o.Clock_Out,
+       o.ClockDate AS ClockDate,
+	   e.Clock_In,
+	   CAST(ROUND(DATEDIFF(second,o.Clock_Out,e.Clock_In)/3600.00,2) AS DECIMAL(10,1)) AS BreakHours
+INTO #BreakHours FROM #BreakOUT AS o
+  outer apply (SELECT TOP 1 e2.Clock_In 
+               FROM   #BreakIN AS e2
+               WHERE  e2.ClockDate = o.ClockDate
+			   AND    e2.Clock_In >= o.Clock_Out
+			   AND    e2.Employee_ID = o.Employee_ID
+               ORDER BY e2.Clock_In
+              ) AS e
+ORDER BY o.Employee_ID, o.ClockDate
+ 
+SELECT Employee_ID, ClockDate,SUM(#BreakHours.BreakHours) AS Total_Breaks 
+INTO #BreakHoursPerDay
+FROM #BreakHours
+GROUP BY ClockDate,Employee_ID
+
+
+SELECT bh.Employee_ID, bh.ClockDate, CAST(ROUND(#StartTOEndHoursPerDay.Actual_Hours - 
+(CASE WHEN bh.Total_Breaks IS NULL THEN 0 ELSE bh.Total_Breaks END)
+,2) AS DECIMAL(10,2)) AS Actual_Hours, CASE WHEN #BreakHoursPerDay.Total_Breaks is NULL THEN 0.0 
+ELSE #BreakHoursPerDay.Total_Breaks END
+as BreakHours 
+		INTO #ActualHours
+FROM #BreakHoursPerDay AS bh
+INNER JOIN #StartTOEndHoursPerDay ON #StartTOEndHoursPerDay.Employee_ID = bh.Employee_ID
+INNER JOIN #BreakHoursPerDay ON #BreakHoursPerDay.Employee_ID = bh.Employee_ID
+AND #StartTOEndHoursPerDay.ClockDate = bh.ClockDate
+AND #BreakHoursPerDay.ClockDate = bh.ClockDate
+
+/*Table(0)*/
+SELECT CONCAT(Employee.Surname,', ',Employee.NickName ) As Emp_Name,ah.ClockDate, ah.Actual_Hours
+FROM #ActualHours As ah
+INNER JOIN Employee ON Employee.Employee_ID = ah.Employee_ID
+ORDER BY CONCAT(Employee.Surname,', ',Employee.NickName )
+
+
+/*Table(1)*/
+SELECT CONCAT(Employee.Surname,', ',Employee.NickName ) As Emp_Name, bh.ClockDate,
+		bh.Clock_Out,bh.Clock_In,bh.BreakHours
+FROM #BreakHours AS bh 
+INNER JOIN Employee ON Employee.Employee_ID = bh.Employee_ID
+ORDER BY  CONCAT(Employee.Surname,', ',Employee.NickName )
+
+/*Table(2)*/
+SELECT CONCAT(Employee.Surname,', ',Employee.NickName ) As Emp_Name, bpd.ClockDate, bpd.Breaks
+FROM #BreaksPerDay as bpd
+INNER JOIN Employee ON Employee.Employee_ID = bpd.Employee_ID
+ORDER BY CONCAT(Employee.Surname,', ',Employee.NickName )
+
+SELECT s.ClockDate, s.Employee_ID,
+CASE WHEN s.ConcDate IS NOT NULL
+THEN CAST(ROUND(DATEDIFF(second,s.ConcIN,s.ConcDate)/3600.00,2)AS DECIMAL(10,1))
+ELSE NULL END AS TotalHours
+INTO #TOTAL
+FROM #SortedClockTimes as s
+INNER JOIN #StartToEnd ON #StartToEnd.Employee_ID = s.Employee_ID
+AND #StartToEnd.ClockDate = s.ClockDate
+
+UPDATE
+    #StartToEnd
+SET
+    #StartToEnd.Total_Hours = #TOTAL.TotalHours
+FROM
+    #StartToEnd ste
+INNER JOIN
+    #TOTAL
+ON 
+    ste.ClockDate = #TOTAL.ClockDate
+	WHERE #TOTAL.TotalHours IS NOT NULL
+	AND ste.Employee_ID = #TOTAL.Employee_ID
+
+SELECT ste.Emp_Name, ste.ClockDate, ste.OfficeID,
+		CASE WHEN CAST(ste.Time_In as time(0)) is NULL THEN '' ELSE CAST(ste.Time_In as time(0)) END AS Time_In, 
+		CASE WHEN CAST(ste.Time_Out as time(0)) is NULL THEN '' ELSE CAST(ste.Time_Out as time(0)) END AS Time_Out, 
+		CASE WHEN #StartTOEndHoursPerDay.Total_Hours is NULL THEN '' ELSE #StartTOEndHoursPerDay.Total_Hours END AS Total_Hours, 
+		CASE WHEN #ActualHours.Actual_Hours IS NULL THEN 0 ELSE #ActualHours.Actual_Hours END Actual_Hours, 
+		#BreaksPerDay.Breaks,#ActualHours.BreakHours,
+		ste.Notes
+		INTO #Report
+		FROM #StartTOEnd ste
+		INNER JOIN #ActualHours ON #ActualHours.Employee_ID = ste.Employee_ID
+		INNER JOIN #BreaksPerDay ON #BreaksPerDay.Employee_ID = ste.Employee_ID
+		INNER JOIN #StartTOEndHoursPerDay ON #StartTOEndHoursPerDay.Employee_ID = ste.Employee_ID
+		WHERE ste.ClockDate = #ActualHours.ClockDate
+		AND #StartTOEndHoursPerDay.ClockDate = ste.ClockDate
+		AND #BreaksPerDay.ClockDate = ste.ClockDate
+		AND OfficeID = IIF(@OfficeID='',OfficeID,@OfficeID)
+
+		--Table(3)
+		SELECT  * FROM #Report
+		ORDER BY Emp_Name, ClockDate
+		--SELECT * FROM #StartTOEndHoursPerDay
+		--SELECT * FROM #ActualHours
+
+		DROP TABLE Present
+		SELECT Employee_ID,ClockDate
+		INTO Present
+		FROM #Report
+		INNER JOIN Employee ON CONCAT(Surname,', ',NickName) = #Report.Emp_Name
+		Group By Employee_ID, ClockDate
+
+		--TABLE(4)
+		SELECT DISTINCT(Employee_ID),ClockDate FROM Present
+
+		SELECT * FROM #BreakHoursPerDay
+
+DROP TABLE #StartToEndHoursPerDay
+DROP TABLE #SortedClockTimes
+DROP TABLE #BreaksPerDay
+DROP TABLE #ActualHours
+DROP TABLE #BreakOUT
+DROP TABLE #BreakHours
+DROP TABLE #BreakIN
+DROP TABLE #BreakHoursPerDay
+DROP TABLE #Report
+DROP TABLE #StartToEnd
+DROP TABLE #ClockWNotes
+DROP TABLE #TOTAL
+END
